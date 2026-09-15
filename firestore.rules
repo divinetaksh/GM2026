@@ -1,0 +1,74 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidEvent(data) {
+      return data.id is string && data.id.size() <= 128
+        && data.name is string && data.name.size() <= 200
+        && data.eventCode is string && data.eventCode.size() <= 32
+        && data.societyName is string && data.societyName.size() <= 150
+        && data.contributionAmount is number && data.contributionAmount >= 0
+        && data.paidHouses is list && data.paidHouses.size() <= 1000
+        && data.createdAt is string && data.createdAt.size() <= 64;
+    }
+
+    function isValidPass(data) {
+      return data.id is string && data.id.size() <= 128
+        && data.eventId is string && data.eventId.size() <= 128
+        && data.eventCode is string && data.eventCode.size() <= 32
+        && data.houseNo is string && data.houseNo.size() <= 32
+        && data.residentName is string && data.residentName.size() <= 120
+        && data.memberCount is number && data.memberCount >= 1 && data.memberCount <= 50
+        && data.qrPayload is string && data.qrPayload.size() <= 2000
+        && data.issuedAt is string && data.issuedAt.size() <= 64;
+    }
+
+    function isValidCheckIn(data) {
+      return data.id is string && data.id.size() <= 128
+        && data.eventId is string && data.eventId.size() <= 128
+        && data.houseNo is string && data.houseNo.size() <= 32
+        && data.memberCount is number && data.memberCount >= 0 && data.memberCount <= 50
+        && data.scannedAt is string && data.scannedAt.size() <= 64
+        && (data.status == 'approved' || data.status == 'duplicate_warning' || data.status == 'invalid')
+        && data.rawPayload is string && data.rawPayload.size() <= 2000;
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Connection test document
+    match /test/{docId} {
+      allow read: if true;
+    }
+
+    // Events collection
+    match /events/{eventId} {
+      allow read: if true;
+      allow create: if isValidId(eventId) && isValidEvent(request.resource.data);
+      allow update: if isValidId(eventId) && isValidEvent(request.resource.data);
+      allow delete: if isValidId(eventId);
+    }
+
+    // Passes collection
+    match /passes/{passId} {
+      allow read: if true;
+      allow create: if isValidId(passId) && isValidPass(request.resource.data);
+      allow update: if isValidId(passId) && isValidPass(request.resource.data);
+      allow delete: if isValidId(passId);
+    }
+
+    // Gate Checkins collection
+    match /checkins/{checkinId} {
+      allow read: if true;
+      allow create: if isValidId(checkinId) && isValidCheckIn(request.resource.data);
+      allow update: if isValidId(checkinId) && isValidCheckIn(request.resource.data);
+      allow delete: if isValidId(checkinId);
+    }
+  }
+}

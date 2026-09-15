@@ -1,0 +1,82 @@
+{
+  "entities": {
+    "SocietyEvent": {
+      "title": "SocietyEvent",
+      "description": "Represents a society cultural/festival event and its list of paid flat/house members",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique event identifier" },
+        "name": { "type": "string", "description": "Name of the festival or event" },
+        "eventCode": { "type": "string", "description": "Short code e.g. GM2026" },
+        "societyName": { "type": "string", "description": "Name of the residential society" },
+        "eventPassword": { "type": "string", "description": "Event management passcode" },
+        "contributionAmount": { "type": "number", "description": "Fee per flat in INR" },
+        "date": { "type": "string", "description": "Date or date range of the event" },
+        "venue": { "type": "string", "description": "Location / venue within society" },
+        "paidHouses": { "type": "array", "description": "List of house numbers verified as paid" },
+        "createdAt": { "type": "string", "description": "ISO timestamp of creation" },
+        "notes": { "type": "string", "description": "Optional notes or meal information" }
+      },
+      "required": ["id", "name", "eventCode", "societyName", "contributionAmount", "date", "venue", "paidHouses", "createdAt"]
+    },
+    "PassRecord": {
+      "title": "PassRecord",
+      "description": "Digital entry pass issued to a resident for a specific event",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Pass ID" },
+        "eventId": { "type": "string", "description": "Associated event ID" },
+        "eventCode": { "type": "string", "description": "Associated event code" },
+        "societyName": { "type": "string", "description": "Society name" },
+        "eventName": { "type": "string", "description": "Event name" },
+        "houseNo": { "type": "string", "description": "Resident house/flat number" },
+        "residentName": { "type": "string", "description": "Resident primary contact name" },
+        "memberCount": { "type": "number", "description": "Number of family members covered by pass" },
+        "foodPreference": { "type": "string", "description": "Food preference type e.g. regular or swaminarayan_jain" },
+        "swaminarayanCount": { "type": "number", "description": "Number of swaminarayan/jain food packs" },
+        "phone": { "type": "string", "description": "Contact telephone number" },
+        "qrPayload": { "type": "string", "description": "Serialized payload contained in the QR code" },
+        "issuedAt": { "type": "string", "description": "ISO timestamp when pass was generated" },
+        "amountPaid": { "type": "number", "description": "Contribution amount registered" }
+      },
+      "required": ["id", "eventId", "eventCode", "houseNo", "residentName", "memberCount", "qrPayload", "issuedAt"]
+    },
+    "GateCheckInRecord": {
+      "title": "GateCheckInRecord",
+      "description": "Log entry recorded when a pass is scanned at the society gate",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Log entry unique ID" },
+        "eventId": { "type": "string", "description": "Associated event ID" },
+        "eventCode": { "type": "string", "description": "Associated event code" },
+        "houseNo": { "type": "string", "description": "Resident house/flat number" },
+        "residentName": { "type": "string", "description": "Resident name on pass" },
+        "memberCount": { "type": "number", "description": "Admitted member count" },
+        "swaminarayanCount": { "type": "number", "description": "Admitted swaminarayan count" },
+        "foodPreference": { "type": "string", "description": "Food preference" },
+        "scannedAt": { "type": "string", "description": "ISO timestamp of scan" },
+        "status": { "type": "string", "description": "Entry verification status (approved, duplicate_warning, invalid)" },
+        "rawPayload": { "type": "string", "description": "Raw string scanned from QR code" },
+        "reason": { "type": "string", "description": "Reason for status if duplicate or warning" },
+        "totalRegistered": { "type": "number", "description": "Total family member count registered on pass" },
+        "alreadyEntered": { "type": "number", "description": "Family members already entered before this scan" },
+        "remaining": { "type": "number", "description": "Remaining members still outside after this scan" }
+      },
+      "required": ["id", "eventId", "eventCode", "houseNo", "residentName", "memberCount", "scannedAt", "status", "rawPayload"]
+    }
+  },
+  "firestore": {
+    "/events/{eventId}": {
+      "schema": "SocietyEvent",
+      "description": "Cultural/festival events with details and verified paid house roster"
+    },
+    "/passes/{passId}": {
+      "schema": "PassRecord",
+      "description": "Issued resident event passes with QR payloads"
+    },
+    "/checkins/{checkinId}": {
+      "schema": "GateCheckInRecord",
+      "description": "Gate scanner entry logs for tracking member entries and preventing duplicates"
+    }
+  }
+}

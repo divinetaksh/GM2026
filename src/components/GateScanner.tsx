@@ -677,7 +677,7 @@ export const GateScanner: React.FC<GateScannerProps> = ({
                         <span className="text-emerald-800">All {scanResult.parsed.swaminarayanCount} Swaminarayan / Jain</span>
                       ) : (
                         <span>
-                          <span className="text-emerald-800">{scanResult.parsed.swaminarayanCount} Swami/Jain</span>
+                          <span className="text-emerald-800">{scanResult.parsed.swaminarayanCount} Swaminarayan/Jain</span>
                           {' + '}
                           <span className="text-stone-700">{scanResult.parsed.memberCount - scanResult.parsed.swaminarayanCount} Regular</span>
                         </span>
@@ -937,12 +937,12 @@ export const GateScanner: React.FC<GateScannerProps> = ({
                         {c.swaminarayanCount && c.swaminarayanCount > 0 ? (
                           <span className="text-emerald-700 font-semibold flex items-center gap-0.5">
                             <Leaf className="w-3 h-3" />
-                            {c.swaminarayanCount} Swami/Jain
+                            {c.swaminarayanCount} Swaminarayan/Jain
                           </span>
                         ) : c.foodPreference === 'swaminarayan_jain' ? (
                           <span className="text-emerald-700 font-semibold flex items-center gap-0.5">
                             <Leaf className="w-3 h-3" />
-                            Swami/Jain
+                            Swaminarayan / Jain
                           </span>
                         ) : (
                           <span className="text-stone-500">Regular Veg</span>

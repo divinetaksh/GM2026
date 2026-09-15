@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import * as XLSX from 'xlsx';
 import {
   Calendar,
   Plus,
@@ -30,6 +31,7 @@ import {
   RefreshCw,
   UtensilsCrossed,
   Leaf,
+  Cloud,
 } from 'lucide-react';
 import { SocietyEvent, PassRecord, GateCheckInRecord } from '../types';
 import { normalizeHouseNo } from '../utils/qr';
@@ -40,11 +42,13 @@ import {
   importSocietyDataBackup,
   getAdminMasterPin,
   setAdminMasterPin,
+  isAuthorizedAdminPin,
   deleteSingleIssuedPass,
   clearIssuedPasses,
   clearGateCheckIns,
   clearAllEventData,
   resetAllSocietyDatabase,
+  syncEventsToCloud,
 } from '../utils/storage';
 import { PassCard } from './PassCard';
 
@@ -104,9 +108,36 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [houseSearchQuery, setHouseSearchQuery] = useState('');
   const [saveSuccessNotice, setSaveSuccessNotice] = useState(false);
 
+  // Excel Sheet Import Result Review Modal State
+  const [excelImportResult, setExcelImportResult] = useState<{
+    fileName: string;
+    totalRows: number;
+    paidHouses: string[];
+    unpaidHouses: { house: string; amount: string | number }[];
+  } | null>(null);
+  const [excelImportSyncing, setExcelImportSyncing] = useState(false);
+
   // Issued Passes Audit Search and View Modal
   const [passSearchQuery, setPassSearchQuery] = useState('');
   const [selectedPassForView, setSelectedPassForView] = useState<PassRecord | null>(null);
+
+  // Cloud Firestore Sync state
+  const [cloudSyncing, setCloudSyncing] = useState(false);
+  const [cloudSyncSuccess, setCloudSyncSuccess] = useState(false);
+
+  const handlePushToCloud = async () => {
+    try {
+      setCloudSyncing(true);
+      await syncEventsToCloud(events);
+      setCloudSyncSuccess(true);
+      setTimeout(() => setCloudSyncSuccess(false), 3000);
+    } catch (err) {
+      console.error('Failed to sync to cloud', err);
+      alert('Failed to sync with cloud. Please check network connectivity.');
+    } finally {
+      setCloudSyncing(false);
+    }
+  };
 
   // Modal for new event creation
   const [showNewEventModal, setShowNewEventModal] = useState(false);
@@ -190,6 +221,37 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     setPaidHousesList(paidHousesList.filter((h) => h !== houseToRemove));
   };
 
+  const handleClearAllHouses = () => {
+    if (paidHousesList.length === 0) return;
+    if (confirm(`Are you sure you want to clear all ${paidHousesList.length} verified houses for this event? No house will be pre-approved until you add or paste them.`)) {
+      setPaidHousesList([]);
+    }
+  };
+
+  const [quickPaidSyncing, setQuickPaidSyncing] = useState(false);
+  const [quickPaidSuccess, setQuickPaidSuccess] = useState(false);
+
+  const handleQuickSavePaidHouses = async () => {
+    try {
+      setQuickPaidSyncing(true);
+      const updatedEvent: SocietyEvent = {
+        ...currentEditingEvent,
+        paidHouses: paidHousesList,
+      };
+      const updatedEvents = events.map((e) => (e.id === updatedEvent.id ? updatedEvent : e));
+      saveStoredEvents(updatedEvents);
+      onUpdateEvents(updatedEvents);
+      await syncEventsToCloud(updatedEvents);
+      setQuickPaidSuccess(true);
+      setTimeout(() => setQuickPaidSuccess(false), 3000);
+    } catch (err) {
+      console.error('Failed to sync paid houses to cloud', err);
+      alert('Failed to sync to online cloud. Please check network.');
+    } finally {
+      setQuickPaidSyncing(false);
+    }
+  };
+
   const handleSaveChanges = (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -227,14 +289,12 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       id: newId,
       name: newEventName.trim(),
       eventCode: newEventCode.trim().toUpperCase(),
-      societyName: societyName.trim() || 'Residential CHS',
+      societyName: societyName.trim() || 'Taksh Divine',
       eventPassword: newEventPassword.trim(),
       contributionAmount: Number(newEventFee) || 1500,
       date: 'Upcoming Season',
       venue: 'Society Clubhouse',
-      paidHouses: [
-        'A-101', 'A-102', 'A-103', 'A-201', 'A-202', 'B-101', 'B-102', 'C-101'
-      ],
+      paidHouses: [],
       createdAt: new Date().toISOString(),
     };
 
@@ -258,34 +318,51 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   };
 
   const handleClearCurrentEventPasses = () => {
-    const count = currentEventPasses.length;
-    if (confirm(`CLEAR ALL RESIDENT DATA?\n\nThis will remove all generated resident passes from localStorage ('society_issued_passes' & 'society_issued_passes_v1').\n\nYour event settings and approved paid houses list will remain intact, giving you a 100% clean slate for the event.`)) {
-      clearIssuedPasses(currentEditingEvent.id);
+    if (
+      confirm(
+        `CLEAR ALL RESIDENT DATA FOR "${currentEditingEvent.name.toUpperCase()}"?\n\n` +
+        `This will reset:\n` +
+        `• All Generated Resident Passes (${currentEventPasses.length}) to 0\n` +
+        `• All Gate Check-In & Admission Scans (${thisEventCheckIns.length}) to 0\n\n` +
+        `Both Google Cloud Firestore and local storage will be cleared back to 0.\n` +
+        `Your society event settings and verified paid houses list will remain intact.\n\n` +
+        `Proceed to reset all passes and gate attendance to 0?`
+      )
+    ) {
+      clearAllEventData(currentEditingEvent.id, currentEditingEvent.eventCode);
       try {
         localStorage.removeItem('society_issued_passes');
       } catch {}
-      const remaining = issuedPasses.filter((p) => p.eventId !== currentEditingEvent.id);
-      if (onUpdatePasses) onUpdatePasses(remaining);
-      alert(`Cleared all resident passes. Resident pass data is now completely fresh!`);
+      const remainingPasses = issuedPasses.filter(
+        (p) => p.eventId !== currentEditingEvent.id && p.eventCode?.toLowerCase() !== currentEditingEvent.eventCode?.toLowerCase()
+      );
+      const remainingCheckIns = checkIns.filter(
+        (c) => c.eventId !== currentEditingEvent.id && c.eventCode?.toLowerCase() !== currentEditingEvent.eventCode?.toLowerCase()
+      );
+      if (onUpdatePasses) onUpdatePasses(remainingPasses);
+      if (onUpdateCheckIns) onUpdateCheckIns(remainingCheckIns);
+      alert(`Cleared all resident passes and gate admission check-ins back to 0!`);
     }
   };
 
   const handleClearCurrentEventCheckIns = () => {
     const count = thisEventCheckIns.length;
     if (count === 0) {
-      alert('There are no gate check-in logs to clear for this event.');
+      alert('There are no gate check-in logs to clear for this event (already 0).');
       return;
     }
-    if (confirm(`Clear all ${count} gate check-in logs and attendance records for "${currentEditingEvent.name}"?`)) {
-      clearGateCheckIns(currentEditingEvent.id);
-      const remaining = checkIns.filter((c) => c.eventId !== currentEditingEvent.id);
+    if (confirm(`Reset Gate Attendance Counter to 0?\n\nThis will clear all ${count} gate check-in logs and admission records for "${currentEditingEvent.name}" from both Cloud and Local Storage.`)) {
+      clearGateCheckIns(currentEditingEvent.id, currentEditingEvent.eventCode);
+      const remaining = checkIns.filter(
+        (c) => c.eventId !== currentEditingEvent.id && c.eventCode?.toLowerCase() !== currentEditingEvent.eventCode?.toLowerCase()
+      );
       if (onUpdateCheckIns) onUpdateCheckIns(remaining);
-      alert(`Cleared ${count} check-in entries.`);
+      alert(`Gate attendance counter successfully reset to 0.`);
     }
   };
 
   const handleStartFreshEvent = () => {
-    if (confirm(`START FRESH FOR "${currentEditingEvent.name.toUpperCase()}"?\n\nThis will remove:\n• All issued passes for this event (${currentEventPasses.length})\n• All gate check-in logs for this event (${thisEventCheckIns.length})\n\nYour 259 paid houses list and event configuration will remain preserved. Continue?`)) {
+    if (confirm(`START FRESH FOR "${currentEditingEvent.name.toUpperCase()}"?\n\nThis will remove:\n• All issued passes for this event (${currentEventPasses.length})\n• All gate check-in logs for this event (${thisEventCheckIns.length})\n\nYour verified paid houses list and event configuration will remain preserved. Continue?`)) {
       clearAllEventData(currentEditingEvent.id);
       const remPasses = issuedPasses.filter((p) => p.eventId !== currentEditingEvent.id);
       const remCheckIns = checkIns.filter((c) => c.eventId !== currentEditingEvent.id);
@@ -353,134 +430,283 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     e.target.value = '';
   };
 
-  const handleExportPaidHousesCSV = () => {
-    const headers = ['House Number', 'Event Name', 'Event Code', 'Society Name', 'Contribution Amount (INR)'];
-    const rows = paidHousesList.map((h) => [
-      `"${h}"`,
-      `"${currentEditingEvent.name}"`,
-      `"${currentEditingEvent.eventCode}"`,
-      `"${currentEditingEvent.societyName}"`,
-      contributionAmount,
-    ]);
-    const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `${currentEditingEvent.eventCode}_Paid_Houses_${new Date().toISOString().slice(0, 10)}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
+  const handleExportPaidHousesExcel = () => {
+    if (paidHousesList.length === 0) {
+      alert('No paid houses found for this event.');
+      return;
+    }
+    const excelRows = paidHousesList.map((h) => ({
+      'House Number': h,
+      'Event Name': currentEditingEvent.name,
+      'Event Code': currentEditingEvent.eventCode,
+      'Society Name': currentEditingEvent.societyName,
+      'Contribution Amount (INR)': contributionAmount,
+    }));
+    const ws = XLSX.utils.json_to_sheet(excelRows);
+    ws['!cols'] = [{ wch: 16 }, { wch: 32 }, { wch: 14 }, { wch: 20 }, { wch: 24 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Paid Houses');
+    XLSX.writeFile(wb, `${currentEditingEvent.eventCode || 'Taksh_Divine'}_Paid_Houses_Directory.xlsx`);
   };
 
-  const handleExportIssuedPassesCSV = () => {
-    const headers = [
-      'House Number',
-      'Resident Name',
-      'Total Members Allowed',
-      'Food Dietary Preference',
-      'Swaminarayan / Jain Meals',
-      'Regular Pure Veg Meals',
-      'Phone',
-      'Event Code',
-      'Event Name',
-      'Issued Date & Time'
-    ];
-    const rows = currentEventPasses.map((p) => {
-      const swamiCount = p.swaminarayanCount !== undefined && p.swaminarayanCount > 0 ? p.swaminarayanCount : (p.foodPreference === 'swaminarayan_jain' ? p.memberCount : 0);
+  const handleExportIssuedPassesExcel = () => {
+    if (currentEventPasses.length === 0) {
+      alert('No passes have been generated for this event yet.');
+      return;
+    }
+    const excelRows = currentEventPasses.map((p) => {
+      const swamiCount = p.swaminarayanCount !== undefined && p.swaminarayanCount > 0
+        ? p.swaminarayanCount
+        : (p.foodPreference === 'swaminarayan_jain' ? p.memberCount : 0);
       const regCount = Math.max(0, p.memberCount - swamiCount);
-      const foodLabel = p.foodPreference === 'swaminarayan_jain' || swamiCount > 0 ? 'Swaminarayan / Jain' : 'Regular Pure Veg';
-      return [
-        `"${p.houseNo}"`,
-        `"${p.residentName}"`,
-        p.memberCount,
-        `"${foodLabel}"`,
-        swamiCount,
-        regCount,
-        `"${p.phone || ''}"`,
-        `"${p.eventCode}"`,
-        `"${p.eventName}"`,
-        `"${new Date(p.issuedAt).toLocaleString()}"`,
-      ];
+      const foodLabel = swamiCount > 0 && regCount > 0
+        ? `${swamiCount} Swaminarayan/Jain + ${regCount} Regular`
+        : (swamiCount > 0 ? 'Swaminarayan / Jain' : 'Regular Pure Veg');
+
+      const isAdmitted = thisEventCheckIns.some(
+        (c) => c.houseNo.toLowerCase() === p.houseNo.toLowerCase()
+      );
+
+      return {
+        'House Number': p.houseNo,
+        'Resident Name': p.residentName,
+        'Mobile Number': p.phone || 'N/A',
+        'No. of Persons (Guest Count)': p.memberCount,
+        'Refreshments / Lunch / Dinner Dietary': foodLabel,
+        'Swaminarayan / Jain Count': swamiCount,
+        'Regular Pure Veg Count': regCount,
+        'Gate Pass Code (PIN)': p.id,
+        'Admitted Inside Status': isAdmitted ? 'ADMITTED (INSIDE)' : 'NOT SCANNED',
+        'Event Code': p.eventCode,
+        'Pass Generated Date & Time': new Date(p.issuedAt).toLocaleString('en-IN'),
+        'QR Payload': p.qrPayload,
+      };
     });
-    const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `${currentEditingEvent.eventCode}_Issued_Passes_${new Date().toISOString().slice(0, 10)}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
+
+    const ws = XLSX.utils.json_to_sheet(excelRows);
+    ws['!cols'] = [
+      { wch: 14 },
+      { wch: 24 },
+      { wch: 16 },
+      { wch: 24 },
+      { wch: 34 },
+      { wch: 24 },
+      { wch: 22 },
+      { wch: 20 },
+      { wch: 24 },
+      { wch: 14 },
+      { wch: 26 },
+      { wch: 40 },
+    ];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Registered Member Passes');
+    XLSX.writeFile(wb, `${currentEditingEvent.eventCode || 'Taksh_Divine'}_Registered_Members_PassCodes_${new Date().toISOString().slice(0, 10)}.xlsx`);
   };
 
-  const handleExportAttendanceLogCSV = () => {
-    const headers = [
-      'House Number',
-      'Resident Name',
-      'Members Admitted',
-      'Food Preference',
-      'Swaminarayan / Jain Meals',
-      'Regular Pure Veg Meals',
-      'Check-In Timestamp',
-      'Status',
-      'Remaining Outside',
-      'Total Registered'
-    ];
-    const rows = thisEventCheckIns.map((c) => {
-      const swamiCount = c.swaminarayanCount !== undefined && c.swaminarayanCount > 0 ? c.swaminarayanCount : (c.foodPreference === 'swaminarayan_jain' ? c.memberCount : 0);
+  const handleExportAttendanceLogExcel = () => {
+    if (thisEventCheckIns.length === 0) {
+      alert('No check-in records have been scanned for this event yet.');
+      return;
+    }
+    const excelRows = thisEventCheckIns.map((c) => {
+      const matchingPass = currentEventPasses.find(
+        (p) => p.houseNo.toLowerCase() === c.houseNo.toLowerCase()
+      );
+      const swamiCount = c.swaminarayanCount !== undefined && c.swaminarayanCount > 0
+        ? c.swaminarayanCount
+        : (c.foodPreference === 'swaminarayan_jain' ? c.memberCount : 0);
       const regCount = Math.max(0, c.memberCount - swamiCount);
-      const foodLabel = c.foodPreference === 'swaminarayan_jain' || swamiCount > 0 ? 'Swaminarayan / Jain' : 'Regular Pure Veg';
-      return [
-        `"${c.houseNo}"`,
-        `"${c.residentName || ''}"`,
-        c.memberCount,
-        `"${foodLabel}"`,
-        swamiCount,
-        regCount,
-        `"${new Date(c.scannedAt).toLocaleString()}"`,
-        `"${c.status}"`,
-        c.remaining ?? '',
-        c.totalRegistered ?? '',
-      ];
+      const foodLabel = c.foodPreference === 'swaminarayan_jain' || swamiCount > 0
+        ? 'Swaminarayan / Jain'
+        : 'Regular Pure Veg';
+
+      return {
+        'House Number': c.houseNo,
+        'Resident Name': c.residentName || matchingPass?.residentName || 'Resident',
+        'Mobile Number': matchingPass?.phone || 'N/A',
+        'Members Admitted': c.memberCount,
+        'Refreshments / Lunch / Dinner Dietary': foodLabel,
+        'Swaminarayan / Jain Count': swamiCount,
+        'Regular Pure Veg Count': regCount,
+        'Gate Pass Code (PIN)': matchingPass?.id || 'N/A',
+        'Check-In Timestamp': new Date(c.scannedAt).toLocaleString('en-IN'),
+        'Status': c.status,
+      };
     });
-    const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `${currentEditingEvent.eventCode}_Gate_Attendance_${new Date().toISOString().slice(0, 10)}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
+
+    const ws = XLSX.utils.json_to_sheet(excelRows);
+    ws['!cols'] = [
+      { wch: 14 },
+      { wch: 24 },
+      { wch: 16 },
+      { wch: 18 },
+      { wch: 32 },
+      { wch: 24 },
+      { wch: 22 },
+      { wch: 20 },
+      { wch: 26 },
+      { wch: 14 },
+    ];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Gate Attendance Log');
+    XLSX.writeFile(wb, `${currentEditingEvent.eventCode || 'Taksh_Divine'}_Gate_Attendance_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
+  const handleDownloadSampleExcel = () => {
+    const sampleData = [
+      ['House No', 'Amount'],
+      ['101', 1500],
+      ['102', 1500],
+      ['103', 0],
+      ['104', 1500],
+      ['105', 500],
+      ['106', 1500],
+      ['107', 1500],
+      ['108', 0],
+      ['109', 1500],
+      ['110', 1500],
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(sampleData);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Paid_Houses');
+    XLSX.writeFile(wb, `${currentEditingEvent.eventCode || 'Taksh_Divine'}_Paid_House_List_Template.xlsx`);
   };
 
   const handleImportHousesFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
     const reader = new FileReader();
     reader.onload = (event) => {
-      const text = event.target?.result as string;
-      if (text) {
-        const items = text
-          .split(/[\n,;\t\r]+/)
-          .map((item) => item.replace(/["']/g, '').trim())
-          .filter((item) => item.length > 0 && (!isNaN(Number(item)) || /^[A-Za-z0-9-]+$/.test(item)))
-          .filter(
-            (item) =>
-              !item.toLowerCase().includes('house') &&
-              !item.toLowerCase().includes('flat') &&
-              !item.toLowerCase().includes('number')
-          );
-
-        if (items.length > 0) {
-          const unique = Array.from(new Set([...paidHousesList, ...items]));
-          setPaidHousesList(unique);
-          alert(`Successfully imported ${items.length} house numbers from file into current event!`);
-        } else {
-          alert('Could not detect valid house numbers in the uploaded file.');
+      try {
+        const buffer = event.target?.result as ArrayBuffer;
+        const workbook = XLSX.read(new Uint8Array(buffer), { type: 'array' });
+        const firstSheetName = workbook.SheetNames[0];
+        if (!firstSheetName) {
+          alert('Spreadsheet has no sheets.');
+          return;
         }
+
+        const worksheet = workbook.Sheets[firstSheetName];
+        const rows: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
+
+        if (!rows || rows.length === 0) {
+          alert('Uploaded Excel / CSV spreadsheet is empty.');
+          return;
+        }
+
+        const paidList: string[] = [];
+        const unpaidList: { house: string; amount: string | number }[] = [];
+
+        for (let i = 0; i < rows.length; i++) {
+          const row = rows[i];
+          if (!row || row.length === 0) continue;
+
+          const rawHouse = row[0];
+          const rawAmount = row[1];
+
+          if (rawHouse === undefined || rawHouse === null) continue;
+          const houseStr = String(rawHouse).trim();
+          if (!houseStr) continue;
+
+          // Check if header row
+          const lower = houseStr.toLowerCase();
+          if (
+            lower === 'house no' ||
+            lower === 'house' ||
+            lower === 'house_no' ||
+            lower === 'houseno' ||
+            lower === 'flat' ||
+            lower === 'flat no' ||
+            lower === 'flat number' ||
+            lower === 'unit' ||
+            lower === 'unit no' ||
+            lower === 'flat / house'
+          ) {
+            continue;
+          }
+
+          const normalized = normalizeHouseNo(houseStr);
+
+          // User Rule: Two columns. Col 1 = House No, Col 2 = Amount.
+          // If amount is 1500, consider as paid. Otherwise not paid.
+          if (rawAmount !== undefined && rawAmount !== null && String(rawAmount).trim() !== '') {
+            const cleanAmountStr = String(rawAmount).replace(/[₹,$\s]/g, '').trim();
+            const parsedAmount = parseFloat(cleanAmountStr);
+
+            const isPaid =
+              parsedAmount === 1500 ||
+              (!isNaN(parsedAmount) && parsedAmount === Number(currentEditingEvent.contributionAmount));
+
+            if (isPaid) {
+              paidList.push(normalized);
+            } else {
+              unpaidList.push({
+                house: normalized,
+                amount: rawAmount,
+              });
+            }
+          } else {
+            // No amount specified -> Unpaid
+            unpaidList.push({
+              house: normalized,
+              amount: '0 (Unpaid / Blank)',
+            });
+          }
+        }
+
+        const uniquePaid = Array.from(new Set(paidList));
+
+        if (uniquePaid.length === 0 && unpaidList.length === 0) {
+          alert('Could not detect any valid house records in the spreadsheet.');
+          return;
+        }
+
+        setExcelImportResult({
+          fileName: file.name,
+          totalRows: rows.length,
+          paidHouses: uniquePaid,
+          unpaidHouses: unpaidList,
+        });
+      } catch (err) {
+        console.error('Failed to parse Excel file:', err);
+        alert('Failed to parse spreadsheet. Please ensure it is a valid .xlsx, .xls, or .csv file.');
       }
     };
-    reader.readAsText(file);
+    reader.readAsArrayBuffer(file);
     e.target.value = '';
+  };
+
+  const handleApplyExcelImport = async (mode: 'replace' | 'append') => {
+    if (!excelImportResult) return;
+    try {
+      setExcelImportSyncing(true);
+      const importedPaid = excelImportResult.paidHouses;
+      let finalHouses: string[] = [];
+      if (mode === 'replace') {
+        finalHouses = Array.from(new Set(importedPaid));
+      } else {
+        finalHouses = Array.from(new Set([...paidHousesList, ...importedPaid]));
+      }
+      setPaidHousesList(finalHouses);
+
+      const updatedEvent: SocietyEvent = {
+        ...currentEditingEvent,
+        paidHouses: finalHouses,
+      };
+      const updatedEvents = events.map((e) => (e.id === updatedEvent.id ? updatedEvent : e));
+      saveStoredEvents(updatedEvents);
+      onUpdateEvents(updatedEvents);
+      await syncEventsToCloud(updatedEvents);
+
+      alert(`✅ Updated list with ${importedPaid.length} verified paid houses (Amount: ₹1,500) and synced to Firebase Cloud!`);
+      setExcelImportResult(null);
+    } catch (err) {
+      console.error('Failed to sync imported houses to cloud:', err);
+      alert('Saved locally, but failed to sync to cloud. Please check network connection.');
+    } finally {
+      setExcelImportSyncing(false);
+    }
   };
 
   const filteredHouses = paidHousesList.filter((h) =>
@@ -537,23 +763,19 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         <div className="w-14 h-14 bg-amber-100 rounded-2xl flex items-center justify-center text-amber-800 mx-auto mb-4">
           <Lock className="w-7 h-7" />
         </div>
-        <h2 className="text-xl font-bold text-stone-900">Committee Admin Lock</h2>
+        <h2 className="text-xl font-bold text-stone-900">Admin Mode Lock</h2>
         <p className="text-xs text-stone-500 mt-1">
-          This panel is restricted to society committee members. Enter master PIN to continue.
+          This panel has full administrator rights to remove and delete data. Enter Admin password to continue.
         </p>
 
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            const currentMasterPin = getAdminMasterPin();
-            if (
-              adminPinInput.trim() === currentMasterPin ||
-              adminPinInput.trim() === '1234'
-            ) {
+            if (isAuthorizedAdminPin(adminPinInput.trim())) {
               setIsAdminUnlocked(true);
               setPinError('');
             } else {
-              setPinError('Incorrect PIN. Enter 1234.');
+              setPinError('Incorrect password. Access denied.');
             }
           }}
           className="mt-6 space-y-4"
@@ -562,7 +784,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             type="password"
             value={adminPinInput}
             onChange={(e) => setAdminPinInput(e.target.value)}
-            placeholder="Enter Admin PIN (Default: 1234)"
+            placeholder="Enter Admin Password"
             className="w-full px-4 py-3 rounded-xl border-2 border-stone-200 text-center text-lg tracking-widest font-mono font-bold"
             autoFocus
           />
@@ -746,8 +968,28 @@ Show this QR pass at the entrance gate for instant entry!
               Real-Time Gate Attendance &amp; Admission Metrics — {currentEditingEvent.name}
             </h3>
           </div>
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-stone-800 border border-stone-700 text-stone-300 font-bold uppercase tracking-wider">
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={handleExportIssuedPassesExcel}
+              className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs flex items-center gap-1.5 shadow-md transition active:scale-95 cursor-pointer"
+              title="Export all registered members, gate passes, passcodes and mobile numbers in Excel (.xlsx)"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Export Member Passes &amp; PassCodes (.xlsx)</span>
+            </button>
+            {totalAdmittedPersons > 0 && (
+              <button
+                type="button"
+                onClick={handleClearCurrentEventCheckIns}
+                className="px-2.5 py-1.5 rounded-xl bg-red-950/80 hover:bg-red-900 border border-red-800 text-red-300 font-bold text-xs flex items-center gap-1 shadow-sm transition active:scale-95 cursor-pointer"
+                title="Reset gate admission count and checked-in logs back to 0"
+              >
+                <Trash2 className="w-3 h-3 text-red-400" />
+                <span>Reset Gate to 0</span>
+              </button>
+            )}
+            <span className="text-[10px] font-mono px-2 py-1 rounded-full bg-stone-800 border border-stone-700 text-stone-300 font-bold uppercase tracking-wider">
               Live Sync Active
             </span>
           </div>
@@ -985,7 +1227,7 @@ Show this QR pass at the entrance gate for instant entry!
                 type="text"
                 value={societyName}
                 onChange={(e) => setSocietyName(e.target.value)}
-                placeholder="e.g. Shree Balaji Heights CHS"
+                placeholder="e.g. Taksh Divine"
                 className="w-full px-3.5 py-2.5 rounded-xl border border-stone-300 text-sm font-semibold focus:border-orange-500 outline-none"
                 required
               />
@@ -1088,25 +1330,44 @@ Show this QR pass at the entrance gate for instant entry!
 
         {/* 2. Master Array of Paid House Numbers */}
         <div className="bg-white rounded-3xl p-6 shadow-xl border border-stone-200 space-y-5">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-stone-100">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-stone-100">
             <div>
               <h3 className="text-base font-bold text-stone-900">
                 2. Master Array of Paid House Numbers
               </h3>
               <p className="text-xs text-stone-500 mt-0.5">
-                Pass generator strictly verifies resident house numbers against this pre-approved array.
+                Pass generator strictly verifies resident house numbers against this online approved array. Update and sync to cloud in real-time.
               </p>
             </div>
-            <span className="inline-flex items-center gap-1 text-xs font-extrabold px-3 py-1 bg-orange-100 text-orange-900 rounded-full">
-              {paidHousesList.length} Verified Houses
-            </span>
+            <div className="flex items-center gap-2">
+              <span className={`inline-flex items-center gap-1 text-xs font-extrabold px-3 py-1.5 rounded-full ${
+                paidHousesList.length === 0 ? 'bg-stone-100 text-stone-600' : 'bg-orange-100 text-orange-900'
+              }`}>
+                {paidHousesList.length} Verified Houses
+              </span>
+              <button
+                type="button"
+                onClick={handleQuickSavePaidHouses}
+                disabled={quickPaidSyncing}
+                className="py-1.5 px-3.5 rounded-xl bg-orange-600 hover:bg-orange-700 disabled:opacity-50 text-white font-bold text-xs flex items-center gap-1.5 transition active:scale-95 shadow-2xs cursor-pointer"
+                title="Save verified houses list and sync to Firebase Cloud"
+              >
+                <Cloud className="w-3.5 h-3.5" />
+                <span>{quickPaidSyncing ? 'Syncing...' : quickPaidSuccess ? 'Saved Online!' : 'Save & Sync Online'}</span>
+              </button>
+            </div>
           </div>
 
           {/* Bulk Paste / Input Section */}
           <div className="bg-amber-50/50 p-4 rounded-2xl border border-amber-200/70 space-y-3">
-            <label className="block text-xs font-bold uppercase tracking-wider text-stone-800">
-              Input / Paste Master Array of Paid House Numbers
-            </label>
+            <div className="flex items-center justify-between">
+              <label className="block text-xs font-bold uppercase tracking-wider text-stone-800">
+                Input / Paste Master Array of Paid House Numbers
+              </label>
+              <span className="text-[11px] font-medium text-stone-500">
+                Syncs online to Firebase
+              </span>
+            </div>
             <textarea
               value={bulkInputText}
               onChange={(e) => setBulkInputText(e.target.value)}
@@ -1129,16 +1390,36 @@ Show this QR pass at the entrance gate for instant entry!
               >
                 Replace Entire List
               </button>
-              <label className="py-2 px-3 rounded-xl bg-white border border-stone-300 hover:bg-stone-100 text-stone-700 font-semibold text-xs flex items-center gap-1.5 cursor-pointer transition shadow-2xs">
-                <Upload className="w-3.5 h-3.5 text-stone-500" />
-                <span>Upload CSV / TXT</span>
+              <label className="py-2 px-3 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-semibold text-xs flex items-center gap-1.5 cursor-pointer transition shadow-2xs">
+                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-100" />
+                <span>Import Excel Sheet (.xlsx / .csv)</span>
                 <input
                   type="file"
-                  accept=".csv,.txt"
+                  accept=".xlsx,.xls,.csv,.txt"
                   onChange={handleImportHousesFile}
                   className="hidden"
                 />
               </label>
+              <button
+                type="button"
+                onClick={handleDownloadSampleExcel}
+                className="py-2 px-3 rounded-xl bg-white border border-stone-300 hover:bg-stone-100 text-stone-700 font-semibold text-xs flex items-center gap-1.5 transition shadow-2xs"
+                title="Download 2-Column Excel Template: House No and Amount"
+              >
+                <Download className="w-3.5 h-3.5 text-stone-500" />
+                <span>Download Excel Template</span>
+              </button>
+              {paidHousesList.length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleClearAllHouses}
+                  className="py-2 px-3 rounded-xl bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 font-semibold text-xs flex items-center gap-1 transition"
+                  title="Clear all houses from this list"
+                >
+                  <Trash2 className="w-3.5 h-3.5 text-red-600" />
+                  <span>Clear All Houses</span>
+                </button>
+              )}
             </div>
           </div>
 
@@ -1186,9 +1467,18 @@ Show this QR pass at the entrance gate for instant entry!
           {/* Paid Houses Badges List */}
           <div className="p-3.5 bg-stone-50 rounded-2xl border border-stone-200 max-h-56 overflow-y-auto">
             {filteredHouses.length === 0 ? (
-              <p className="text-xs text-stone-400 text-center py-4">
-                No matching house numbers found.
-              </p>
+              <div className="text-center py-6 px-4 space-y-1">
+                <p className="text-xs font-bold text-stone-700">
+                  {paidHousesList.length === 0
+                    ? 'No pre-approved houses in this list'
+                    : 'No matching house numbers found'}
+                </p>
+                <p className="text-[11px] text-stone-500 max-w-md mx-auto">
+                  {paidHousesList.length === 0
+                    ? 'The pre-verified list is empty. Type or paste paid house numbers above and click "Save & Sync Online" to allow residents to generate passes.'
+                    : 'Try searching with a different house number.'}
+                </p>
+              </div>
             ) : (
               <div className="flex flex-wrap gap-1.5">
                 {filteredHouses.map((house) => (
@@ -1230,14 +1520,22 @@ Show this QR pass at the entrance gate for instant entry!
                 {totalRegisteredMembers} Total Members Registered
               </span>
               <button
+                type="button"
+                onClick={handleExportIssuedPassesExcel}
+                className="py-1.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center gap-1.5 transition active:scale-95 shadow-sm"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Export Member Passes (.xlsx)</span>
+              </button>
+              <button
                 id="btn-clear-resident-data"
                 type="button"
                 onClick={handleClearCurrentEventPasses}
                 className="py-1.5 px-3 rounded-xl bg-red-50 hover:bg-red-100 border border-red-200 text-red-700 font-bold text-xs flex items-center gap-1.5 transition active:scale-95 shadow-2xs"
-                title="Clear all generated passes from localStorage to start fresh for this event"
+                title="Reset all generated passes and gate check-in admissions back to 0 for this event"
               >
                 <Trash2 className="w-3.5 h-3.5 text-red-600" />
-                <span>Clear All Resident Data</span>
+                <span>Clear All Passes &amp; Gate Scans</span>
               </button>
             </div>
           </div>
@@ -1283,12 +1581,12 @@ Show this QR pass at the entrance gate for instant entry!
                         {p.swaminarayanCount && p.swaminarayanCount > 0 ? (
                           <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 flex items-center gap-0.5">
                             <Leaf className="w-2.5 h-2.5" />
-                            {p.swaminarayanCount} Swami/Jain
+                            {p.swaminarayanCount} Swaminarayan/Jain
                           </span>
                         ) : p.foodPreference === 'swaminarayan_jain' ? (
                           <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 flex items-center gap-0.5">
                             <Leaf className="w-2.5 h-2.5" />
-                            Swami/Jain
+                            Swaminarayan / Jain
                           </span>
                         ) : (
                           <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-stone-100 text-stone-600">
@@ -1349,6 +1647,43 @@ Show this QR pass at the entrance gate for instant entry!
             <span className="inline-flex items-center gap-1 text-[11px] font-bold px-2.5 py-1 bg-teal-50 text-teal-800 rounded-full border border-teal-200">
               Offline Data Ready
             </span>
+          </div>
+
+          {/* Cloud Firestore Online Database Card */}
+          <div className="bg-gradient-to-r from-amber-50 to-orange-50 p-5 rounded-2xl border border-amber-200 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <span className="p-2.5 rounded-xl bg-orange-600 text-white shadow-xs">
+                  <Cloud className="w-5 h-5" />
+                </span>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h4 className="text-sm font-black uppercase text-stone-900 tracking-tight">
+                      Google Firebase Cloud Database
+                    </h4>
+                    <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded-full border border-emerald-200">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                      Live &amp; Online
+                    </span>
+                  </div>
+                  <p className="text-xs text-stone-600 mt-0.5">
+                    Project: <code className="font-mono font-bold text-amber-950">absolute-logic-vxjsq</code> &bull; Verified paid member houses, event details, and digital passes sync automatically across all resident phones in real-time.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={handlePushToCloud}
+                  disabled={cloudSyncing}
+                  className="py-2.5 px-4 rounded-xl bg-orange-600 hover:bg-orange-700 disabled:opacity-50 text-white font-bold text-xs flex items-center gap-1.5 transition active:scale-95 shadow-sm"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${cloudSyncing ? 'animate-spin' : ''}`} />
+                  <span>{cloudSyncing ? 'Syncing...' : cloudSyncSuccess ? 'Synced to Cloud!' : 'Force Sync to Cloud'}</span>
+                </button>
+              </div>
+            </div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1422,38 +1757,38 @@ Show this QR pass at the entrance gate for instant entry!
               <div className="space-y-2 pt-1">
                 <button
                   type="button"
-                  onClick={handleExportPaidHousesCSV}
-                  className="w-full py-2 px-3 rounded-xl bg-white border border-stone-300 hover:border-emerald-500 text-stone-700 font-semibold text-xs flex items-center justify-between transition hover:bg-emerald-50/50 shadow-2xs"
+                  onClick={handleExportIssuedPassesExcel}
+                  className="w-full py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-between transition active:scale-95 shadow-sm"
                 >
                   <span className="flex items-center gap-2">
-                    <Download className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>Paid Houses Directory ({paidHousesList.length} houses)</span>
+                    <Download className="w-4 h-4 text-white" />
+                    <span>Export Registered Members, Passes &amp; Mobile Numbers</span>
                   </span>
-                  <span className="text-[10px] uppercase font-bold text-stone-400">CSV</span>
+                  <span className="text-[10px] uppercase font-extrabold bg-white/20 px-2 py-0.5 rounded-md text-white">XLSX</span>
                 </button>
 
                 <button
                   type="button"
-                  onClick={handleExportIssuedPassesCSV}
-                  className="w-full py-2 px-3 rounded-xl bg-white border border-stone-300 hover:border-emerald-500 text-stone-700 font-semibold text-xs flex items-center justify-between transition hover:bg-emerald-50/50 shadow-2xs"
-                >
-                  <span className="flex items-center gap-2">
-                    <Download className="w-3.5 h-3.5 text-amber-600" />
-                    <span>Issued Passes Audit ({currentEventPasses.length} passes)</span>
-                  </span>
-                  <span className="text-[10px] uppercase font-bold text-stone-400">CSV</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={handleExportAttendanceLogCSV}
+                  onClick={handleExportAttendanceLogExcel}
                   className="w-full py-2 px-3 rounded-xl bg-white border border-stone-300 hover:border-emerald-500 text-stone-700 font-semibold text-xs flex items-center justify-between transition hover:bg-emerald-50/50 shadow-2xs"
                 >
                   <span className="flex items-center gap-2">
                     <Download className="w-3.5 h-3.5 text-blue-600" />
                     <span>Gate Attendance &amp; Check-In Log ({thisEventCheckIns.length} admissions)</span>
                   </span>
-                  <span className="text-[10px] uppercase font-bold text-stone-400">CSV</span>
+                  <span className="text-[10px] uppercase font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200">XLSX</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleExportPaidHousesExcel}
+                  className="w-full py-2 px-3 rounded-xl bg-white border border-stone-300 hover:border-emerald-500 text-stone-700 font-semibold text-xs flex items-center justify-between transition hover:bg-emerald-50/50 shadow-2xs"
+                >
+                  <span className="flex items-center gap-2">
+                    <Download className="w-3.5 h-3.5 text-stone-600" />
+                    <span>Paid Houses Directory ({paidHousesList.length} houses)</span>
+                  </span>
+                  <span className="text-[10px] uppercase font-bold text-stone-600 bg-stone-100 px-1.5 py-0.5 rounded border border-stone-200">XLSX</span>
                 </button>
               </div>
             </div>
@@ -1467,7 +1802,7 @@ Show this QR pass at the entrance gate for instant entry!
                 <span>Event Data Management &amp; Clean Slate</span>
               </h4>
               <p className="text-[11px] text-stone-500 mt-0.5">
-                Clear test passes from local storage to start fresh for a new event while keeping settings intact.
+                Reset all test passes and gate admission scans back to 0 across both Cloud and local cache.
               </p>
             </div>
 
@@ -1476,14 +1811,16 @@ Show this QR pass at the entrance gate for instant entry!
                 type="button"
                 onClick={handleClearCurrentEventPasses}
                 className="flex-1 sm:flex-initial py-2 px-3.5 rounded-xl bg-red-50 hover:bg-red-100 border border-red-200 text-red-700 font-bold text-xs flex items-center justify-center gap-1.5 transition active:scale-95 shadow-2xs"
+                title="Reset all generated passes and gate check-in admissions back to 0"
               >
                 <Trash2 className="w-3.5 h-3.5 text-red-600" />
-                <span>Clear All Resident Data</span>
+                <span>Clear All Passes &amp; Gate Scans</span>
               </button>
               <button
                 type="button"
                 onClick={handleStartFreshEvent}
                 className="flex-1 sm:flex-initial py-2 px-3.5 rounded-xl bg-stone-800 hover:bg-stone-900 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition active:scale-95 shadow-2xs"
+                title="Start 100% fresh with zero passes and zero admissions while keeping society setup"
               >
                 <RefreshCw className="w-3.5 h-3.5 text-amber-400" />
                 <span>Start Fresh Event</span>
@@ -1789,6 +2126,170 @@ Show this QR pass at the entrance gate for instant entry!
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Excel Sheet Import Review Modal */}
+      {excelImportResult && (
+        <div
+          id="modal-excel-import-review"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-950/80 backdrop-blur-xs animate-in fade-in duration-150 overflow-y-auto"
+        >
+          <div className="relative max-w-lg w-full bg-white rounded-3xl p-6 shadow-2xl border border-stone-200 my-8 space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-stone-100">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-emerald-100 text-emerald-800">
+                  <FileSpreadsheet className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-extrabold text-stone-900">
+                    Excel Sheet Import Review
+                  </h3>
+                  <p className="text-xs text-stone-500 truncate max-w-xs sm:max-w-sm">
+                    {excelImportResult.fileName} &bull; {excelImportResult.totalRows} rows evaluated
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setExcelImportResult(null)}
+                className="p-1.5 rounded-xl hover:bg-stone-100 text-stone-400 hover:text-stone-700 transition"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Validation Rule Notice */}
+            <div className="p-3 bg-amber-50 rounded-2xl border border-amber-200/80 text-xs text-amber-900 space-y-1">
+              <p className="font-bold flex items-center gap-1.5">
+                <IndianRupee className="w-3.5 h-3.5 text-amber-700" />
+                <span>Verification Rule Applied:</span>
+              </p>
+              <p className="text-[11px] text-stone-700">
+                Column 1 has House No and Column 2 has Amount. Only houses with amount equal to <strong>₹1,500</strong> are marked as <strong>PAID</strong>. All other houses (0, partial, or blank) are marked as <strong>UNPAID</strong> and excluded from passes.
+              </p>
+            </div>
+
+            {/* Metrics Breakdown */}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="p-3.5 rounded-2xl bg-emerald-50/80 border border-emerald-200 text-left">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-emerald-800 uppercase tracking-wider">
+                    Paid Houses
+                  </span>
+                  <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                </div>
+                <div className="text-2xl font-black text-emerald-700 mt-1">
+                  {excelImportResult.paidHouses.length}
+                </div>
+                <p className="text-[10px] text-emerald-700 mt-0.5">
+                  Amount: ₹1,500 (Approved)
+                </p>
+              </div>
+
+              <div className="p-3.5 rounded-2xl bg-rose-50/80 border border-rose-200 text-left">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-rose-800 uppercase tracking-wider">
+                    Not Paid
+                  </span>
+                  <span className="w-2 h-2 rounded-full bg-rose-400" />
+                </div>
+                <div className="text-2xl font-black text-rose-700 mt-1">
+                  {excelImportResult.unpaidHouses.length}
+                </div>
+                <p className="text-[10px] text-rose-700 mt-0.5">
+                  Amount != ₹1,500 (Excluded)
+                </p>
+              </div>
+            </div>
+
+            {/* Paid Houses Preview */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-bold text-stone-800">
+                  Verified Paid Houses Preview ({excelImportResult.paidHouses.length})
+                </span>
+                <span className="text-[10px] text-stone-400">Scroll to view</span>
+              </div>
+              <div className="p-2.5 rounded-xl bg-stone-50 border border-stone-200 max-h-32 overflow-y-auto flex flex-wrap gap-1.5">
+                {excelImportResult.paidHouses.length === 0 ? (
+                  <p className="text-xs text-stone-400 py-2 w-full text-center">
+                    No houses with amount ₹1,500 found.
+                  </p>
+                ) : (
+                  excelImportResult.paidHouses.map((h) => (
+                    <span
+                      key={h}
+                      className="px-2 py-0.5 rounded-md bg-emerald-100 border border-emerald-200 text-emerald-900 text-xs font-bold"
+                    >
+                      {h}
+                    </span>
+                  ))
+                )}
+              </div>
+            </div>
+
+            {/* Unpaid Houses Preview */}
+            {excelImportResult.unpaidHouses.length > 0 && (
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-bold text-stone-700">
+                    Excluded Unpaid Houses ({excelImportResult.unpaidHouses.length})
+                  </span>
+                  <span className="text-[10px] text-rose-600 font-semibold">Will not get passes</span>
+                </div>
+                <div className="p-2.5 rounded-xl bg-rose-50/50 border border-rose-100 max-h-24 overflow-y-auto flex flex-wrap gap-1.5">
+                  {excelImportResult.unpaidHouses.slice(0, 30).map((u, idx) => (
+                    <span
+                      key={idx}
+                      className="px-2 py-0.5 rounded-md bg-white border border-rose-200 text-rose-800 text-[11px] font-medium"
+                    >
+                      {u.house}: ₹{String(u.amount)}
+                    </span>
+                  ))}
+                  {excelImportResult.unpaidHouses.length > 30 && (
+                    <span className="text-[11px] text-stone-500 self-center">
+                      +{excelImportResult.unpaidHouses.length - 30} more
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Action Buttons */}
+            <div className="pt-3 border-t border-stone-100 space-y-2">
+              <div className="flex flex-col sm:flex-row gap-2">
+                <button
+                  type="button"
+                  disabled={excelImportSyncing || excelImportResult.paidHouses.length === 0}
+                  onClick={() => handleApplyExcelImport('replace')}
+                  className="flex-1 py-2.5 px-3.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition shadow-sm"
+                >
+                  <Cloud className="w-3.5 h-3.5" />
+                  <span>{excelImportSyncing ? 'Syncing...' : 'Replace Entire List & Sync Online'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  disabled={excelImportSyncing || excelImportResult.paidHouses.length === 0}
+                  onClick={() => handleApplyExcelImport('append')}
+                  className="flex-1 py-2.5 px-3.5 rounded-xl bg-stone-800 hover:bg-stone-900 disabled:opacity-50 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition shadow-sm"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Append Paid Houses</span>
+                </button>
+              </div>
+
+              <button
+                type="button"
+                disabled={excelImportSyncing}
+                onClick={() => setExcelImportResult(null)}
+                className="w-full py-2 rounded-xl text-stone-600 hover:bg-stone-100 text-xs font-semibold"
+              >
+                Cancel
+              </button>
+            </div>
           </div>
         </div>
       )}

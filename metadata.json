@@ -1,6 +1,6 @@
 {
-  "name": "Society Event & Digital Pass Manager",
-  "description": "Offline-first residential society event pass generator and QR gate verification scanner",
+  "name": "Taksh Divine - Society Pass",
+  "description": "Digital event pass generator and QR gate verification scanner for Taksh Divine residents",
   "requestFramePermissions": [
     "camera"
   ],

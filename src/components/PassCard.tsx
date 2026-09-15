@@ -149,9 +149,9 @@ export const PassCard: React.FC<PassCardProps> = ({ pass, event, onClose }) => {
         ctx.fillStyle = '#059669';
         ctx.font = 'bold 36px sans-serif';
         const foodDietLabel = pass.swaminarayanCount && pass.swaminarayanCount > 0
-          ? ` (${pass.swaminarayanCount} Swami/Jain, ${pass.memberCount - pass.swaminarayanCount} Reg)`
+          ? ` (${pass.swaminarayanCount} Swaminarayan/Jain, ${pass.memberCount - pass.swaminarayanCount} Reg)`
           : pass.foodPreference === 'swaminarayan_jain'
-          ? ' (Swami/Jain No Onion-Garlic)'
+          ? ' (Swaminarayan/Jain No Onion-Garlic)'
           : ' (Regular Pure Veg)';
         ctx.fillText(`${pass.memberCount} Members Attending${foodDietLabel}`, 120, 725);
 
@@ -340,7 +340,7 @@ export const PassCard: React.FC<PassCardProps> = ({ pass, event, onClose }) => {
               </span>
               <div>
                 <span className="text-[10px] uppercase font-bold text-stone-500 block">
-                  Dinner / Prasad Dietary
+                  Refreshments / Lunch / Dinner Dietary
                 </span>
                 <span className="font-bold text-xs">
                   {pass.swaminarayanCount && pass.swaminarayanCount > 0 ? (
@@ -361,12 +361,12 @@ export const PassCard: React.FC<PassCardProps> = ({ pass, event, onClose }) => {
                 </span>
               </div>
             </div>
-            <span className={`text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-full ${
+            <span className={`text-[10px] font-extrabold uppercase px-2.5 py-1 rounded-full whitespace-nowrap shrink-0 ${
               pass.foodPreference === 'swaminarayan_jain' || (pass.swaminarayanCount && pass.swaminarayanCount > 0)
-                ? 'bg-emerald-200/80 text-emerald-900'
+                ? 'bg-emerald-200 text-emerald-950 border border-emerald-300'
                 : 'bg-stone-100 text-stone-700'
             }`}>
-              {pass.foodPreference === 'swaminarayan_jain' || (pass.swaminarayanCount && pass.swaminarayanCount > 0) ? 'Jain / Swami' : 'Regular Veg'}
+              {pass.foodPreference === 'swaminarayan_jain' || (pass.swaminarayanCount && pass.swaminarayanCount > 0) ? 'Swaminarayan / Jain' : 'Regular Veg'}
             </span>
           </div>
 
